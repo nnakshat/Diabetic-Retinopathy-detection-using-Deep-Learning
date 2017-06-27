@@ -1,0 +1,97 @@
+from __future__ import division, print_function
+import os
+from multiprocessing.pool import Pool
+import click
+import numpy as np
+from PIL import Image, ImageFilter
+import data
+from tqdm import tqdm
+
+Number_of_processes = 2
+
+
+def square_bbox(img):
+    w, h = img.size
+    left = max((w-h)//2, 0)
+    upper = 0
+    right = min(w - (w-h) // 2, w)
+    lower = h
+    return (left, upper, right, lower)
+
+def convert(fname, crop_size):
+    img = Image.open(fname)
+    
+    blurred = img.filter(ImageFilter.BLUR)
+    after_blur = np.array(blurred)
+    h, w, _ = after_blur.shape
+        
+    if w > 1.2*h:
+        lmax = after_blur[:, : w//32, :].max(axis=(0,1)).astype(int)
+        rmax = after_blur[:, -w//32:, :].max(axis=(0,1)).astype(int)
+        max_background = np.maximum(lmax, rmax)
+        foreground = (after_blur > max_background + 10).astype(np.uint8)
+        bbox = Image.fromarray(foreground).getbbox()
+        
+        if bbox is None:
+            print('bbox none for {} (???)'.format(fname))
+        else:
+            left, upper, right, lower = bbox
+            if right - left < 0.8 * h or lower - upper < 0.8 * h:
+                print("box too small")
+                bbox = None
+    else:
+        bbox = None
+    if bbox is None:
+        bbox = square_bbox(img)
+    cropped = img.crop(bbox)
+    resized = cropped.resize([crop_size, crop_size])
+    return resized
+        
+def save(img, fname):
+    img.save(fname, quality=97)
+
+
+def get_convert_fname(fname, extension, directory, convert_directory):
+    return fname.replace('jpeg', extension).replace(directory, convert_directory)
+
+
+def process(arguments):
+    function, arg = arguments
+    directory, convert_directory, fname, crop_size, extension = arg
+    converted_fname = get_convert_fname(fname, extension, directory, convert_directory)
+    
+    if not os.path.exists(converted_fname):
+        img = function(fname, crop_size)
+        save(img, converted_fname)
+
+
+def main(directory, convert_directory, crop_size, extension):
+    try:
+        os.mkdir(convert_directory)
+    except OSError:
+        pass
+    # get the filenames - 
+    filenames = [os.path.join(dp, f) for dp, dn, fn in os.walk(directory) 
+                for f in fn if f.endswith('jpeg') or f.endswith('tiff')]
+    # sort it
+    filenames = sorted(filenames)
+    print("resizing images in {} to {}, hold on.".format(directory, convert_directory))    
+    
+    n = len(filenames)
+    batch_size = 500
+    batches = n // batch_size + 1
+    pool = Pool(Number_of_processes)
+    
+    arguments = []
+    for f in filenames:
+        arguments.append((convert, (directory, convert_directory, f, crop_size, extension)))
+
+    for i in tqdm(range(batches)): 
+        print("batch {} / {}".format(i+1, batches))
+        pool.map(process, arguments[i*batch_size:(i+1)*batch_size])
+    pool.close()
+    print('Complete')
+
+
+main("../kaggle_dataset_eyePacs/Sample/", "../CroppedImgs_toTrain",
+    128, "jpeg")
